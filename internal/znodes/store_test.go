@@ -8,7 +8,7 @@ import (
 func TestCreateGetSetDeleteChildren(t *testing.T) {
 	s := New()
 
-	if _, _, err := s.Create("/app", []byte(`{"k":1}`)); err != nil {
+	if _, _, err := s.Create("/app", []byte(`{"k":1}`), CreateFlags{}); err != nil {
 		t.Fatal(err)
 	}
 	got, st, err := s.Get("/app")
@@ -37,7 +37,7 @@ func TestCreateGetSetDeleteChildren(t *testing.T) {
 		t.Fatalf("get after set = %q", got)
 	}
 
-	if _, _, err := s.Create("/app/workers", nil); err != nil {
+	if _, _, err := s.Create("/app/workers", nil, CreateFlags{}); err != nil {
 		t.Fatal(err)
 	}
 	kids, pst, err := s.Children("/app")
@@ -67,7 +67,7 @@ func TestCreateGetSetDeleteChildren(t *testing.T) {
 
 func TestVersionCAS(t *testing.T) {
 	s := New()
-	if _, _, err := s.Create("/n", []byte("a")); err != nil {
+	if _, _, err := s.Create("/n", []byte("a"), CreateFlags{}); err != nil {
 		t.Fatal(err)
 	}
 	wrong := int32(5)
@@ -93,11 +93,11 @@ func TestVersionCAS(t *testing.T) {
 
 func TestZxidMonotonic(t *testing.T) {
 	s := New()
-	_, a, err := s.Create("/a", nil)
+	_, a, err := s.Create("/a", nil, CreateFlags{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, b, err := s.Create("/b", nil)
+	_, b, err := s.Create("/b", nil, CreateFlags{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,17 +115,17 @@ func TestZxidMonotonic(t *testing.T) {
 
 func TestCreateRequiresParent(t *testing.T) {
 	s := New()
-	if _, _, err := s.Create("/a/b", nil); !errors.Is(err, ErrNoParent) {
+	if _, _, err := s.Create("/a/b", nil, CreateFlags{}); !errors.Is(err, ErrNoParent) {
 		t.Fatalf("err = %v", err)
 	}
 }
 
 func TestCreateDuplicate(t *testing.T) {
 	s := New()
-	if _, _, err := s.Create("/x", nil); err != nil {
+	if _, _, err := s.Create("/x", nil, CreateFlags{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Create("/x", nil); !errors.Is(err, ErrNodeExists) {
+	if _, _, err := s.Create("/x", nil, CreateFlags{}); !errors.Is(err, ErrNodeExists) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -139,10 +139,36 @@ func TestRootAlwaysExists(t *testing.T) {
 	if data != nil {
 		t.Fatalf("root data = %q", data)
 	}
-	if _, _, err := s.Create("/", nil); !errors.Is(err, ErrNodeExists) {
+	if _, _, err := s.Create("/", nil, CreateFlags{}); !errors.Is(err, ErrNodeExists) {
 		t.Fatalf("create root: %v", err)
 	}
 	if err := s.Delete("/", nil); !errors.Is(err, ErrRoot) {
 		t.Fatalf("delete root: %v", err)
+	}
+}
+
+func TestSequentialSuffix(t *testing.T) {
+	s := New()
+	if _, _, err := s.Create("/lock", nil, CreateFlags{}); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for i := 0; i < 3; i++ {
+		p, _, err := s.Create("/lock/guid", []byte("x"), CreateFlags{Sequential: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, p)
+	}
+	want := []string{"/lock/guid-0000000000", "/lock/guid-0000000001", "/lock/guid-0000000002"}
+	if len(names) != 3 || names[0] != want[0] || names[1] != want[1] || names[2] != want[2] {
+		t.Fatalf("names = %v want %v", names, want)
+	}
+	kids, _, err := s.Children("/lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kids) != 3 || kids[0] != "guid-0000000000" {
+		t.Fatalf("children = %v", kids)
 	}
 }

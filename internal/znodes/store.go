@@ -2,6 +2,7 @@ package znodes
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -28,6 +29,13 @@ type Stat struct {
 	NumChildren int   `json:"numChildren"`
 }
 
+// CreateFlags controls sequential (and later ephemeral) create behavior.
+type CreateFlags struct {
+	Sequential bool
+	Ephemeral  bool
+	SessionID  int64
+}
+
 // Store is an in-memory znode tree. Root "/" always exists.
 type Store struct {
 	mu   sync.Mutex
@@ -41,6 +49,7 @@ type node struct {
 	mzxid    int64
 	version  int32
 	cversion int32
+	seq      int32
 	children map[string]*node
 }
 
@@ -54,7 +63,7 @@ func (s *Store) Zxid() int64 {
 	return s.zxid
 }
 
-func (s *Store) Create(path string, data []byte) (string, Stat, error) {
+func (s *Store) Create(path string, data []byte, flags CreateFlags) (string, Stat, error) {
 	path, err := cleanPath(path)
 	if err != nil {
 		return "", Stat{}, err
@@ -73,6 +82,15 @@ func (s *Store) Create(path string, data []byte) (string, Stat, error) {
 			return "", Stat{}, ErrNoParent
 		}
 		return "", Stat{}, err
+	}
+	if flags.Sequential {
+		name = fmt.Sprintf("%s-%010d", name, parent.seq)
+		parent.seq++
+		if parentPath == "/" {
+			path = "/" + name
+		} else {
+			path = parentPath + "/" + name
+		}
 	}
 	if _, exists := parent.children[name]; exists {
 		return "", Stat{}, ErrNodeExists
