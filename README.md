@@ -35,5 +35,7 @@ Set/delete accept `?version=` (CAS); mismatch is HTTP 409. Responses include
 
 `PUT /znodes/{path}?sequential=1` appends `-%010d` using the parent's counter.
 
-See [PLAN.md](PLAN.md) for later slices (sessions, watches, leader latch,
-broadcast).
+Sessions: `POST /sessions` `{timeoutMs}`, `POST /sessions/{id}/ping`, `DELETE /sessions/{id}`.
+Ephemeral creates need `?ephemeral=1` and `X-Session-Id`. Missed pings past timeout delete those znodes.
+
+See [PLAN.md](PLAN.md) for later slices (watches, leader latch, broadcast).
