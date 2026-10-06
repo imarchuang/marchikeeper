@@ -189,6 +189,65 @@ func TestHTTPEphemeralExpire(t *testing.T) {
 	_ = gone.Body.Close()
 }
 
+func TestHTTPOneShotWatch(t *testing.T) {
+	srv := httptest.NewServer(New(nil))
+	defer srv.Close()
+
+	if res := do(t, http.MethodPut, srv.URL+"/znodes/n", `"a"`); res.StatusCode != 201 {
+		t.Fatalf("create %d %s", res.StatusCode, readAll(t, res))
+	}
+	sess := do(t, http.MethodPost, srv.URL+"/sessions", `{"timeoutMs":5000}`)
+	var sbody map[string]any
+	if err := json.NewDecoder(sess.Body).Decode(&sbody); err != nil {
+		t.Fatal(err)
+	}
+	_ = sess.Body.Close()
+	sid := int64(sbody["sessionId"].(float64))
+	hdr := strconv.FormatInt(sid, 10)
+
+	watchReq, err := http.NewRequest(http.MethodGet, srv.URL+"/znodes/n?watch=1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watchReq.Header.Set("X-Session-Id", hdr)
+	wres, err := http.DefaultClient.Do(watchReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wres.StatusCode != 200 {
+		t.Fatalf("watch get %d %s", wres.StatusCode, readAll(t, wres))
+	}
+	_ = wres.Body.Close()
+
+	if res := do(t, http.MethodPost, srv.URL+"/znodes/n", `"b"`); res.StatusCode != 200 {
+		t.Fatalf("set %d %s", res.StatusCode, readAll(t, res))
+	}
+	ev := do(t, http.MethodGet, srv.URL+"/events?session="+hdr+"&timeoutMs=500", "")
+	var ebody map[string]any
+	if err := json.NewDecoder(ev.Body).Decode(&ebody); err != nil {
+		t.Fatal(err)
+	}
+	_ = ev.Body.Close()
+	events, _ := ebody["events"].([]any)
+	if len(events) != 1 {
+		t.Fatalf("events = %#v", ebody["events"])
+	}
+
+	if res := do(t, http.MethodPost, srv.URL+"/znodes/n", `"c"`); res.StatusCode != 200 {
+		t.Fatalf("second set %d %s", res.StatusCode, readAll(t, res))
+	}
+	ev2 := do(t, http.MethodGet, srv.URL+"/events?session="+hdr+"&timeoutMs=80", "")
+	var ebody2 map[string]any
+	if err := json.NewDecoder(ev2.Body).Decode(&ebody2); err != nil {
+		t.Fatal(err)
+	}
+	_ = ev2.Body.Close()
+	events2, _ := ebody2["events"].([]any)
+	if len(events2) != 0 {
+		t.Fatalf("re-fired without re-arm: %#v", ebody2["events"])
+	}
+}
+
 func do(t *testing.T, method, url, body string) *http.Response {
 	t.Helper()
 	var rdr io.Reader

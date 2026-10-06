@@ -23,6 +23,7 @@ func New(store *znodes.Store) *Server {
 	}
 	s := &Server{store: store, mux: http.NewServeMux()}
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /events", s.handleEvents)
 	s.mux.HandleFunc("POST /sessions", s.handleCreateSession)
 	s.mux.HandleFunc("POST /sessions/{id}/ping", s.handlePing)
 	s.mux.HandleFunc("DELETE /sessions/{id}", s.handleCloseSession)
@@ -74,6 +75,29 @@ func (s *Server) handleCloseSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "closed": true})
 }
 
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	sid, err := strconv.ParseInt(r.URL.Query().Get("session"), 10, 64)
+	if err != nil || sid == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "session query required"})
+		return
+	}
+	timeout := 5 * time.Second
+	if raw := r.URL.Query().Get("timeoutMs"); raw != "" {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			timeout = time.Duration(n) * time.Millisecond
+		}
+	}
+	ev, err := s.store.WaitEvents(sid, timeout)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	if ev == nil {
+		ev = []znodes.Event{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessionId": sid, "events": ev})
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"ok":true}`))
@@ -107,6 +131,12 @@ func (s *Server) handleGetOrChildren(w http.ResponseWriter, r *http.Request) {
 			writeStoreErr(w, err)
 			return
 		}
+		if r.URL.Query().Get("watch") == "1" {
+			if err := s.store.ArmWatch(path, znodes.WatchChildren, sessionID(r)); err != nil {
+				writeStoreErr(w, err)
+				return
+			}
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"path": path, "children": kids, "stat": st})
 		return
 	}
@@ -114,6 +144,12 @@ func (s *Server) handleGetOrChildren(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeStoreErr(w, err)
 		return
+	}
+	if r.URL.Query().Get("watch") == "1" {
+		if err := s.store.ArmWatch(path, znodes.WatchData, sessionID(r)); err != nil {
+			writeStoreErr(w, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"path": path, "data": jsonData(data), "stat": st})
 }
