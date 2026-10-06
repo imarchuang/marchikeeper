@@ -33,5 +33,7 @@ curl -s -X DELETE localhost:7181/znodes/app/w1
 Set/delete accept `?version=` (CAS); mismatch is HTTP 409. Responses include
 `stat` (`czxid`, `mzxid`, `version`, `cversion`, …).
 
-See [PLAN.md](PLAN.md) for later slices (sequential, sessions, watches,
-leader latch, broadcast).
+`PUT /znodes/{path}?sequential=1` appends `-%010d` using the parent's counter.
+
+See [PLAN.md](PLAN.md) for later slices (sessions, watches, leader latch,
+broadcast).

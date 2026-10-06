@@ -46,7 +46,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	created, st, err := s.store.Create(path, body)
+	flags := znodes.CreateFlags{Sequential: r.URL.Query().Get("sequential") == "1"}
+	created, st, err := s.store.Create(path, body, flags)
 	if err != nil {
 		writeStoreErr(w, err)
 		return

@@ -117,6 +117,31 @@ func TestHTTPVersionCAS(t *testing.T) {
 	_ = delBad.Body.Close()
 }
 
+func TestHTTPSequential(t *testing.T) {
+	srv := httptest.NewServer(New(nil))
+	defer srv.Close()
+
+	if res := do(t, http.MethodPut, srv.URL+"/znodes/lock", `{}`); res.StatusCode != 201 {
+		t.Fatalf("parent %d %s", res.StatusCode, readAll(t, res))
+	}
+	var paths []string
+	for i := 0; i < 3; i++ {
+		res := do(t, http.MethodPut, srv.URL+"/znodes/lock/guid?sequential=1", `"c"`)
+		if res.StatusCode != 201 {
+			t.Fatalf("seq create %d %s", res.StatusCode, readAll(t, res))
+		}
+		var body map[string]any
+		if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		paths = append(paths, body["path"].(string))
+	}
+	if paths[0] != "/lock/guid-0000000000" || paths[2] != "/lock/guid-0000000002" {
+		t.Fatalf("paths = %v", paths)
+	}
+}
+
 func do(t *testing.T, method, url, body string) *http.Response {
 	t.Helper()
 	var rdr io.Reader
