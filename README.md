@@ -42,4 +42,10 @@ Ephemeral creates need `?ephemeral=1` and `X-Session-Id`. Missed pings past time
 delivers one event on `GET /events?session=`; a second mutate does not fire until
 the watch is re-armed.
 
-See [PLAN.md](PLAN.md) for later slices (leader latch, broadcast).
+Leader latch (ephemeral sequential + predecessor watch):
+
+```bash
+go run ./cmd/demo
+```
+
+See [PLAN.md](PLAN.md) for broadcast / failover.
