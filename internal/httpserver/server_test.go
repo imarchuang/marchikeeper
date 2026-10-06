@@ -80,6 +80,43 @@ func TestHTTPZnodeCRUD(t *testing.T) {
 	}
 }
 
+func TestHTTPVersionCAS(t *testing.T) {
+	srv := httptest.NewServer(New(nil))
+	defer srv.Close()
+
+	created := do(t, http.MethodPut, srv.URL+"/znodes/n", `"a"`)
+	if created.StatusCode != 201 {
+		t.Fatalf("create %d %s", created.StatusCode, readAll(t, created))
+	}
+	_ = created.Body.Close()
+
+	mismatch := do(t, http.MethodPost, srv.URL+"/znodes/n?version=9", `"b"`)
+	if mismatch.StatusCode != http.StatusConflict {
+		t.Fatalf("mismatch status %d %s", mismatch.StatusCode, readAll(t, mismatch))
+	}
+	_ = mismatch.Body.Close()
+
+	ok := do(t, http.MethodPost, srv.URL+"/znodes/n?version=0", `"b"`)
+	if ok.StatusCode != 200 {
+		t.Fatalf("cas set %d %s", ok.StatusCode, readAll(t, ok))
+	}
+	var body map[string]any
+	if err := json.NewDecoder(ok.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	_ = ok.Body.Close()
+	st, _ := body["stat"].(map[string]any)
+	if st["version"].(float64) != 1 || st["mzxid"].(float64) != 2 {
+		t.Fatalf("stat = %#v", st)
+	}
+
+	delBad := do(t, http.MethodDelete, srv.URL+"/znodes/n?version=0", "")
+	if delBad.StatusCode != http.StatusConflict {
+		t.Fatalf("delete mismatch %d %s", delBad.StatusCode, readAll(t, delBad))
+	}
+	_ = delBad.Body.Close()
+}
+
 func do(t *testing.T, method, url, body string) *http.Response {
 	t.Helper()
 	var rdr io.Reader

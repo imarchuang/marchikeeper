@@ -30,5 +30,8 @@ curl -s localhost:7181/znodes/app/children
 curl -s -X DELETE localhost:7181/znodes/app/w1
 ```
 
-See [PLAN.md](PLAN.md) for later slices (stat/CAS, sequential, sessions,
-watches, leader latch, broadcast).
+Set/delete accept `?version=` (CAS); mismatch is HTTP 409. Responses include
+`stat` (`czxid`, `mzxid`, `version`, `cversion`, …).
+
+See [PLAN.md](PLAN.md) for later slices (sequential, sessions, watches,
+leader latch, broadcast).

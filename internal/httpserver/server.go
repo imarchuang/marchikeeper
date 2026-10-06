@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/marchi/marchikeeper/internal/znodes"
@@ -45,31 +46,31 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	created, err := s.store.Create(path, body)
+	created, st, err := s.store.Create(path, body)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"path": created, "data": jsonData(body)})
+	writeJSON(w, http.StatusCreated, map[string]any{"path": created, "data": jsonData(body), "stat": st})
 }
 
 func (s *Server) handleGetOrChildren(w http.ResponseWriter, r *http.Request) {
 	path, listChildren := splitChildren(zpath(r))
 	if listChildren {
-		kids, err := s.store.Children(path)
+		kids, st, err := s.store.Children(path)
 		if err != nil {
 			writeStoreErr(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"path": path, "children": kids})
+		writeJSON(w, http.StatusOK, map[string]any{"path": path, "children": kids, "stat": st})
 		return
 	}
-	data, err := s.store.Get(path)
+	data, st, err := s.store.Get(path)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"path": path, "data": jsonData(data)})
+	writeJSON(w, http.StatusOK, map[string]any{"path": path, "data": jsonData(data), "stat": st})
 }
 
 func (s *Server) handleSet(w http.ResponseWriter, r *http.Request) {
@@ -79,20 +80,44 @@ func (s *Server) handleSet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.store.Set(path, body); err != nil {
+	ver, err := queryVersion(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	st, err := s.store.Set(path, body, ver)
+	if err != nil {
 		writeStoreErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"path": path, "data": jsonData(body)})
+	writeJSON(w, http.StatusOK, map[string]any{"path": path, "data": jsonData(body), "stat": st})
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	path := zpath(r)
-	if err := s.store.Delete(path); err != nil {
+	ver, err := queryVersion(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.Delete(path, ver); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"path": path, "deleted": true})
+}
+
+func queryVersion(r *http.Request) (*int32, error) {
+	raw := r.URL.Query().Get("version")
+	if raw == "" {
+		return nil, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	v := int32(n)
+	return &v, nil
 }
 
 func zpath(r *http.Request) string {
