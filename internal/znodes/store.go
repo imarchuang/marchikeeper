@@ -20,6 +20,7 @@ var (
 	ErrNotEphemeral   = errors.New("session required for ephemeral")
 	ErrNoSession      = errors.New("no session")
 	ErrEphemeralChild = errors.New("ephemeral cannot have children")
+	ErrZxidGap        = errors.New("zxid gap")
 )
 
 // Stat is the ZooKeeper-inspired metadata for a znode.
