@@ -48,4 +48,6 @@ Leader latch (ephemeral sequential + predecessor watch):
 go run ./cmd/demo
 ```
 
-See [PLAN.md](PLAN.md) for broadcast / failover.
+In-process 3-node broadcast (slice 6): the leader assigns zxid, followers apply
+the same txns in order. Killing the leader does not drop committed znodes.
+Raft terms are not on the `/znodes` API.
