@@ -38,4 +38,8 @@ Set/delete accept `?version=` (CAS); mismatch is HTTP 409. Responses include
 Sessions: `POST /sessions` `{timeoutMs}`, `POST /sessions/{id}/ping`, `DELETE /sessions/{id}`.
 Ephemeral creates need `?ephemeral=1` and `X-Session-Id`. Missed pings past timeout delete those znodes.
 
-See [PLAN.md](PLAN.md) for later slices (watches, leader latch, broadcast).
+`GET /znodes/{path}?watch=1` (with session header) is one-shot. The next mutate
+delivers one event on `GET /events?session=`; a second mutate does not fire until
+the watch is re-armed.
+
+See [PLAN.md](PLAN.md) for later slices (leader latch, broadcast).

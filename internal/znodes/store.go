@@ -49,6 +49,9 @@ type Store struct {
 	nextSid    int64
 	sessions   map[int64]*session
 	ephByOwner map[int64]map[string]struct{}
+	watches    map[string][]watch
+	pending    map[int64][]Event
+	waiters    map[int64]chan struct{}
 }
 
 type session struct {
@@ -81,6 +84,9 @@ func NewWithClock(c Clock) *Store {
 		clock:      c,
 		sessions:   map[int64]*session{},
 		ephByOwner: map[int64]map[string]struct{}{},
+		watches:    map[string][]watch{},
+		pending:    map[int64][]Event{},
+		waiters:    map[int64]chan struct{}{},
 	}
 }
 
@@ -150,6 +156,7 @@ func (s *Store) Create(path string, data []byte, flags CreateFlags) (string, Sta
 	}
 	parent.children[name] = n
 	parent.cversion++
+	s.fireLocked(parentPath, WatchChildren, Event{Type: "NodeChildrenChanged", Path: parentPath, Zxid: zxid})
 	return path, n.stat(), nil
 }
 
@@ -190,6 +197,7 @@ func (s *Store) Set(path string, data []byte, version *int32) (Stat, error) {
 	n.data = clone(data)
 	n.mzxid = zxid
 	n.version++
+	s.fireLocked(path, WatchData, Event{Type: "NodeDataChanged", Path: path, Zxid: zxid})
 	return n.stat(), nil
 }
 
@@ -227,6 +235,8 @@ func (s *Store) Delete(path string, version *int32) error {
 	if child.ephemeralOwner != 0 {
 		delete(s.ephByOwner[child.ephemeralOwner], path)
 	}
+	s.fireLocked(path, WatchData, Event{Type: "NodeDeleted", Path: path, Zxid: s.zxid})
+	s.fireLocked(parentPath, WatchChildren, Event{Type: "NodeChildrenChanged", Path: parentPath, Zxid: s.zxid})
 	return nil
 }
 
@@ -328,6 +338,7 @@ func (s *Store) closeSessionLocked(id int64) {
 	}
 	delete(s.ephByOwner, id)
 	delete(s.sessions, id)
+	s.dropSessionWatchesLocked(id)
 }
 
 func (s *Store) deleteEphemeralLocked(path string) {
@@ -336,14 +347,14 @@ func (s *Store) deleteEphemeralLocked(path string) {
 	if err != nil {
 		return
 	}
-	child, ok := parent.children[name]
-	if !ok {
+	if _, ok := parent.children[name]; !ok {
 		return
 	}
 	s.nextZxidLocked()
 	delete(parent.children, name)
 	parent.cversion++
-	_ = child
+	s.fireLocked(path, WatchData, Event{Type: "NodeDeleted", Path: path, Zxid: s.zxid})
+	s.fireLocked(parentPath, WatchChildren, Event{Type: "NodeChildrenChanged", Path: parentPath, Zxid: s.zxid})
 }
 
 func (s *Store) lookupLocked(path string) (*node, error) {
