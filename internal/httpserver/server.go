@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/marchi/marchikeeper/internal/znodes"
 )
@@ -22,6 +23,9 @@ func New(store *znodes.Store) *Server {
 	}
 	s := &Server{store: store, mux: http.NewServeMux()}
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("POST /sessions", s.handleCreateSession)
+	s.mux.HandleFunc("POST /sessions/{id}/ping", s.handlePing)
+	s.mux.HandleFunc("DELETE /sessions/{id}", s.handleCloseSession)
 	s.mux.HandleFunc("GET /znodes", s.handleGetOrChildren)
 	s.mux.HandleFunc("PUT /znodes/{path...}", s.handleCreate)
 	s.mux.HandleFunc("GET /znodes/{path...}", s.handleGetOrChildren)
@@ -31,7 +35,43 @@ func New(store *znodes.Store) *Server {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.store.Expire()
 	s.mux.ServeHTTP(w, r)
+}
+
+func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TimeoutMs int64 `json:"timeoutMs"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	id := s.store.CreateSession(time.Duration(req.TimeoutMs) * time.Millisecond)
+	writeJSON(w, http.StatusCreated, map[string]any{"sessionId": id})
+}
+
+func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.Ping(id); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "pong": true})
+}
+
+func (s *Server) handleCloseSession(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.CloseSession(id); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "closed": true})
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -46,7 +86,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	flags := znodes.CreateFlags{Sequential: r.URL.Query().Get("sequential") == "1"}
+	flags := znodes.CreateFlags{
+		Sequential: r.URL.Query().Get("sequential") == "1",
+		Ephemeral:  r.URL.Query().Get("ephemeral") == "1",
+		SessionID:  sessionID(r),
+	}
 	created, st, err := s.store.Create(path, body, flags)
 	if err != nil {
 		writeStoreErr(w, err)
@@ -108,6 +152,15 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"path": path, "deleted": true})
 }
 
+func sessionID(r *http.Request) int64 {
+	raw := r.Header.Get("X-Session-Id")
+	if raw == "" {
+		return 0
+	}
+	id, _ := strconv.ParseInt(raw, 10, 64)
+	return id
+}
+
 func queryVersion(r *http.Request) (*int32, error) {
 	raw := r.URL.Query().Get("version")
 	if raw == "" {
@@ -163,11 +216,11 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 
 func writeStoreErr(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, znodes.ErrNoNode):
+	case errors.Is(err, znodes.ErrNoNode), errors.Is(err, znodes.ErrNoSession):
 		writeErr(w, http.StatusNotFound, err)
 	case errors.Is(err, znodes.ErrNodeExists), errors.Is(err, znodes.ErrNotEmpty), errors.Is(err, znodes.ErrBadVersion):
 		writeErr(w, http.StatusConflict, err)
-	case errors.Is(err, znodes.ErrBadPath), errors.Is(err, znodes.ErrNoParent), errors.Is(err, znodes.ErrRoot), errors.Is(err, znodes.ErrNotEphemeral):
+	case errors.Is(err, znodes.ErrBadPath), errors.Is(err, znodes.ErrNoParent), errors.Is(err, znodes.ErrRoot), errors.Is(err, znodes.ErrNotEphemeral), errors.Is(err, znodes.ErrEphemeralChild):
 		writeErr(w, http.StatusBadRequest, err)
 	default:
 		writeErr(w, http.StatusInternalServerError, err)

@@ -6,27 +6,31 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
-	ErrNoNode       = errors.New("no node")
-	ErrNodeExists   = errors.New("node exists")
-	ErrNotEmpty     = errors.New("not empty")
-	ErrBadPath      = errors.New("bad path")
-	ErrRoot         = errors.New("cannot mutate root")
-	ErrNoParent     = errors.New("no parent")
-	ErrBadVersion   = errors.New("bad version")
-	ErrNotEphemeral = errors.New("session required for ephemeral")
+	ErrNoNode         = errors.New("no node")
+	ErrNodeExists     = errors.New("node exists")
+	ErrNotEmpty       = errors.New("not empty")
+	ErrBadPath        = errors.New("bad path")
+	ErrRoot           = errors.New("cannot mutate root")
+	ErrNoParent       = errors.New("no parent")
+	ErrBadVersion     = errors.New("bad version")
+	ErrNotEphemeral   = errors.New("session required for ephemeral")
+	ErrNoSession      = errors.New("no session")
+	ErrEphemeralChild = errors.New("ephemeral cannot have children")
 )
 
 // Stat is the ZooKeeper-inspired metadata for a znode.
 type Stat struct {
-	Czxid       int64 `json:"czxid"`
-	Mzxid       int64 `json:"mzxid"`
-	Version     int32 `json:"version"`
-	Cversion    int32 `json:"cversion"`
-	DataLength  int   `json:"dataLength"`
-	NumChildren int   `json:"numChildren"`
+	Czxid          int64 `json:"czxid"`
+	Mzxid          int64 `json:"mzxid"`
+	Version        int32 `json:"version"`
+	Cversion       int32 `json:"cversion"`
+	DataLength     int   `json:"dataLength"`
+	NumChildren    int   `json:"numChildren"`
+	EphemeralOwner int64 `json:"ephemeralOwner"`
 }
 
 // CreateFlags controls sequential (and later ephemeral) create behavior.
@@ -38,23 +42,46 @@ type CreateFlags struct {
 
 // Store is an in-memory znode tree. Root "/" always exists.
 type Store struct {
-	mu   sync.Mutex
-	zxid int64
-	root *node
+	mu         sync.Mutex
+	zxid       int64
+	root       *node
+	clock      Clock
+	nextSid    int64
+	sessions   map[int64]*session
+	ephByOwner map[int64]map[string]struct{}
+}
+
+type session struct {
+	id       int64
+	timeout  time.Duration
+	lastPing time.Time
 }
 
 type node struct {
-	data     []byte
-	czxid    int64
-	mzxid    int64
-	version  int32
-	cversion int32
-	seq      int32
-	children map[string]*node
+	data           []byte
+	czxid          int64
+	mzxid          int64
+	version        int32
+	cversion       int32
+	seq            int32
+	ephemeralOwner int64
+	children       map[string]*node
 }
 
 func New() *Store {
-	return &Store{root: &node{children: map[string]*node{}}}
+	return NewWithClock(realClock{})
+}
+
+func NewWithClock(c Clock) *Store {
+	if c == nil {
+		c = realClock{}
+	}
+	return &Store{
+		root:       &node{children: map[string]*node{}},
+		clock:      c,
+		sessions:   map[int64]*session{},
+		ephByOwner: map[int64]map[string]struct{}{},
+	}
 }
 
 func (s *Store) Zxid() int64 {
@@ -75,6 +102,7 @@ func (s *Store) Create(path string, data []byte, flags CreateFlags) (string, Sta
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireLocked()
 
 	parent, err := s.lookupLocked(parentPath)
 	if err != nil {
@@ -82,6 +110,17 @@ func (s *Store) Create(path string, data []byte, flags CreateFlags) (string, Sta
 			return "", Stat{}, ErrNoParent
 		}
 		return "", Stat{}, err
+	}
+	if parent.ephemeralOwner != 0 {
+		return "", Stat{}, ErrEphemeralChild
+	}
+	if flags.Ephemeral {
+		if flags.SessionID == 0 {
+			return "", Stat{}, ErrNotEphemeral
+		}
+		if _, ok := s.sessions[flags.SessionID]; !ok {
+			return "", Stat{}, ErrNoSession
+		}
 	}
 	if flags.Sequential {
 		name = fmt.Sprintf("%s-%010d", name, parent.seq)
@@ -102,6 +141,13 @@ func (s *Store) Create(path string, data []byte, flags CreateFlags) (string, Sta
 		mzxid:    zxid,
 		children: map[string]*node{},
 	}
+	if flags.Ephemeral {
+		n.ephemeralOwner = flags.SessionID
+		if s.ephByOwner[flags.SessionID] == nil {
+			s.ephByOwner[flags.SessionID] = map[string]struct{}{}
+		}
+		s.ephByOwner[flags.SessionID][path] = struct{}{}
+	}
 	parent.children[name] = n
 	parent.cversion++
 	return path, n.stat(), nil
@@ -114,6 +160,7 @@ func (s *Store) Get(path string) ([]byte, Stat, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireLocked()
 	n, err := s.lookupLocked(path)
 	if err != nil {
 		return nil, Stat{}, err
@@ -131,6 +178,7 @@ func (s *Store) Set(path string, data []byte, version *int32) (Stat, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireLocked()
 	n, err := s.lookupLocked(path)
 	if err != nil {
 		return Stat{}, err
@@ -157,6 +205,7 @@ func (s *Store) Delete(path string, version *int32) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireLocked()
 
 	parent, err := s.lookupLocked(parentPath)
 	if err != nil {
@@ -175,6 +224,9 @@ func (s *Store) Delete(path string, version *int32) error {
 	s.nextZxidLocked()
 	delete(parent.children, name)
 	parent.cversion++
+	if child.ephemeralOwner != 0 {
+		delete(s.ephByOwner[child.ephemeralOwner], path)
+	}
 	return nil
 }
 
@@ -185,6 +237,7 @@ func (s *Store) Children(path string) ([]string, Stat, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireLocked()
 	n, err := s.lookupLocked(path)
 	if err != nil {
 		return nil, Stat{}, err
@@ -204,13 +257,93 @@ func (s *Store) nextZxidLocked() int64 {
 
 func (n *node) stat() Stat {
 	return Stat{
-		Czxid:       n.czxid,
-		Mzxid:       n.mzxid,
-		Version:     n.version,
-		Cversion:    n.cversion,
-		DataLength:  len(n.data),
-		NumChildren: len(n.children),
+		Czxid:          n.czxid,
+		Mzxid:          n.mzxid,
+		Version:        n.version,
+		Cversion:       n.cversion,
+		DataLength:     len(n.data),
+		NumChildren:    len(n.children),
+		EphemeralOwner: n.ephemeralOwner,
 	}
+}
+
+func (s *Store) CreateSession(timeout time.Duration) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireLocked()
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	s.nextSid++
+	id := s.nextSid
+	s.sessions[id] = &session{id: id, timeout: timeout, lastPing: s.clock.Now()}
+	return id
+}
+
+func (s *Store) Ping(id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireLocked()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return ErrNoSession
+	}
+	sess.lastPing = s.clock.Now()
+	return nil
+}
+
+func (s *Store) CloseSession(id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireLocked()
+	if _, ok := s.sessions[id]; !ok {
+		return ErrNoSession
+	}
+	s.closeSessionLocked(id)
+	return nil
+}
+
+func (s *Store) Expire() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireLocked()
+}
+
+func (s *Store) expireLocked() {
+	now := s.clock.Now()
+	var dead []int64
+	for id, sess := range s.sessions {
+		if now.Sub(sess.lastPing) >= sess.timeout {
+			dead = append(dead, id)
+		}
+	}
+	for _, id := range dead {
+		s.closeSessionLocked(id)
+	}
+}
+
+func (s *Store) closeSessionLocked(id int64) {
+	for path := range s.ephByOwner[id] {
+		s.deleteEphemeralLocked(path)
+	}
+	delete(s.ephByOwner, id)
+	delete(s.sessions, id)
+}
+
+func (s *Store) deleteEphemeralLocked(path string) {
+	parentPath, name := split(path)
+	parent, err := s.lookupLocked(parentPath)
+	if err != nil {
+		return
+	}
+	child, ok := parent.children[name]
+	if !ok {
+		return
+	}
+	s.nextZxidLocked()
+	delete(parent.children, name)
+	parent.cversion++
+	_ = child
 }
 
 func (s *Store) lookupLocked(path string) (*node, error) {

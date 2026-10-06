@@ -5,8 +5,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/marchi/marchikeeper/internal/znodes"
 )
 
 func TestHealthz(t *testing.T) {
@@ -140,6 +144,49 @@ func TestHTTPSequential(t *testing.T) {
 	if paths[0] != "/lock/guid-0000000000" || paths[2] != "/lock/guid-0000000002" {
 		t.Fatalf("paths = %v", paths)
 	}
+}
+
+func TestHTTPEphemeralExpire(t *testing.T) {
+	clk := znodes.NewFakeClock(time.Unix(1, 0).UTC())
+	store := znodes.NewWithClock(clk)
+	srv := httptest.NewServer(New(store))
+	defer srv.Close()
+
+	if res := do(t, http.MethodPut, srv.URL+"/znodes/workers", `{}`); res.StatusCode != 201 {
+		t.Fatalf("parent %d %s", res.StatusCode, readAll(t, res))
+	}
+
+	sess := do(t, http.MethodPost, srv.URL+"/sessions", `{"timeoutMs":100}`)
+	if sess.StatusCode != 201 {
+		t.Fatalf("session %d %s", sess.StatusCode, readAll(t, sess))
+	}
+	var sbody map[string]any
+	if err := json.NewDecoder(sess.Body).Decode(&sbody); err != nil {
+		t.Fatal(err)
+	}
+	_ = sess.Body.Close()
+	sid := int64(sbody["sessionId"].(float64))
+
+	req, err := http.NewRequest(http.MethodPut, srv.URL+"/znodes/workers/w1?ephemeral=1", strings.NewReader(`{"who":"a"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Session-Id", strconv.FormatInt(sid, 10))
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != 201 {
+		t.Fatalf("eph create %d %s", res.StatusCode, readAll(t, res))
+	}
+	_ = res.Body.Close()
+
+	clk.Advance(100 * time.Millisecond)
+	gone := do(t, http.MethodGet, srv.URL+"/znodes/workers/w1", "")
+	if gone.StatusCode != 404 {
+		t.Fatalf("expected 404 after expire, got %d %s", gone.StatusCode, readAll(t, gone))
+	}
+	_ = gone.Body.Close()
 }
 
 func do(t *testing.T, method, url, body string) *http.Response {
